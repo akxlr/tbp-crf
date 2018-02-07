@@ -1,0 +1,4 @@
+plots/
+hocrf/
+*.pyc
+.DS_Store
