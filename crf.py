@@ -104,16 +104,36 @@ def read_marg(filename, limit=None):
     # print("Read marginals for {} graphs".format(len(all_marginals)))
     # return all_marginals
 
+def adjust_temperature(g: Graph, temp):
+    for factor in g.factors:
+        factor.table = np.exp(np.log(factor.table) / temp)
+
+
+def classification_accuracy(marg_1, marg_2):
+    """
+    :param marg_1: List of lists containing marginals
+    :param marg_2: List of lists containing marginals
+    :return: Rate of matching assignments where each variable is assigned to its highest probability setting.
+    """
+
+    # Results sets must contain the same number of variables
+    assert len(marg_1) == len(marg_2)
+
+    marg_1_assignments = [np.argmax(x) for x in marg_1]
+    marg_2_assignments = [np.argmax(x) for x in marg_2]
+    correct = [x == y for x, y in zip(marg_1_assignments, marg_2_assignments)]
+    return sum(correct) / len(correct)
+
 def save_plot(results, name):
     """
     :param results: dict of results {r -> ({k -> (err, infer_time)}, decomp_time)}
     """
 
     # Draw plot
-    plt.title("CRF tests")
+    plt.title(name)
     plt.xlabel("Sample size K")
     plt.xscale('log')
-    plt.ylabel("Average marginal L1 error")
+    plt.ylabel("Average classification accuracy")
     # markers = ['-.co', '-ks', ':g^', '-ks', '-.ks', ':g', '-m', '-.y', '--r^']
 
     for r in results.keys():
@@ -143,7 +163,18 @@ def save_plot(results, name):
         print(json.dumps(results), file=f)
 
 
-def run_tests(test_group, rs, ks, limit=None):
+def run_tests(test_group, rs, ks, temps=None, limit=None):
+    """
+    :param test_group: Number 1-5 indicating which of Ye Nan's tests to run
+    :param rs: List of r values (number of components)
+    :param ks: List of k values (TBP sample size)
+    :param temps: List of temperature adjustment factors (default is [1], i.e. just use the original graph potentials)
+    :param limit: Set this to limit the number of graphs used for tests
+    :return: Dict of results {temp -> {r -> [{k -> [err, infer_time]}, decomp_time]}}
+    """
+
+    if temps is None:
+        temps = [1]
 
     graph_filename = 'hocrf/fold0-{0}/fold0-{0}.pot'.format(test_group)
     marg_filename = 'hocrf/fold0-{0}/fold0-{0}.marg'.format(test_group)
@@ -155,59 +186,68 @@ def run_tests(test_group, rs, ks, limit=None):
     # if len(marg) != len(gs):
     #     print("Warning: Number of marginals read ({}) not equal to number of graphs read ({})".format(len(marg), len(gs)))
 
-    # Results format will be {r -> [{k -> [err, infer_time]}, decomp_time]}
+    # Results format will be {temp -> {r -> [{k -> [err, infer_time]}, decomp_time]}}
     # Initially, err, infer_time and decomp_time will be lists - later we take the average
-    results = {}
+    all_results = {}
+    for temp in temps:
+        results = {}
+        for r in rs:
+            results[r] = [{}, []]
+            for i, (g, true_marg) in enumerate(zip(
+                    read_pot(graph_filename, limit=limit), read_marg(marg_filename, limit=limit))):
+                print("Graph {}".format(i+1))
 
-    for r in rs:
-        results[r] = [{}, []]
-        for i, (g, true_marg) in enumerate(zip(
-                read_pot(graph_filename, limit=limit), read_marg(marg_filename, limit=limit))):
-            print("Graph {}".format(i+1))
+                # Check number of variables and variable cardinalities match between .pot and .marg
+                cardinalities = g.get_cardinality_list()
+                assert len(cardinalities) == len(true_marg), "Graph {}: Number of variables in .pot ({}) not equal to .marg ({})".format(i, len(cardinalities), len(true_marg))
+                assert all(x == len(LETTERS) for x in cardinalities), "Graph {}: .pot cardinalities are {}, expected all {}".format(i, cardinalities, len(LETTERS))
+                assert all(len(x) == len(LETTERS) for x in true_marg), "Graph {}: .marg cardinalities are {}, expected all {}".format(i, [len(x) for x in true_marg], len(LETTERS))
 
-            # Check number of variables and variable cardinalities match between .pot and .marg
-            cardinalities = g.get_cardinality_list()
-            assert len(cardinalities) == len(true_marg), "Graph {}: Number of variables in .pot ({}) not equal to .marg ({})".format(i, len(cardinalities), len(true_marg))
-            assert all(x == len(LETTERS) for x in cardinalities), "Graph {}: .pot cardinalities are {}, expected all {}".format(i, cardinalities, len(LETTERS))
-            assert all(len(x) == len(LETTERS) for x in true_marg), "Graph {}: .marg cardinalities are {}, expected all {}".format(i, [len(x) for x in true_marg], len(LETTERS))
+                adjust_temperature(g, temp=temp)
 
-            t0 = time.time()
-            dg = g.decompose(r=r)
-            decomp_time = time.time() - t0
-            results[r][1].append(decomp_time)
-
-            for k in ks:
-                if k not in results[r][0]:
-                    results[r][0][k] = [[], []]
                 t0 = time.time()
-                marg_est = dg.tbp_marg(k=k)
-                infer_time = time.time() - t0
-                err = tbp.l1_error(marg_est, true_marg)
-                results[r][0][k][0].append(err)
-                results[r][0][k][1].append(infer_time)
-                print('    r={}, k={}: {}'.format(r, k, err))
+                dg = g.decompose(r=r)
+                decomp_time = time.time() - t0
+                results[r][1].append(decomp_time)
+
+                for k in ks:
+                    if k not in results[r][0]:
+                        results[r][0][k] = [[], []]
+                    t0 = time.time()
+                    marg_est = dg.tbp_marg(k=k)
+                    infer_time = time.time() - t0
+                    # err = tbp.l1_error(marg_est, true_marg)
+                    err = classification_accuracy(marg_est, true_marg)
+                    results[r][0][k][0].append(err)
+                    results[r][0][k][1].append(infer_time)
+                    print('    temp={}, r={}, k={}: {}'.format(temp, r, k, err))
+        all_results[temp] = results
 
     # Take averages
-    for r in rs:
-        for k in ks:
-            # err
-            results[r][0][k][0] = np.mean(results[r][0][k][0])
-            # infer_time
-            results[r][0][k][1] = np.mean(results[r][0][k][1])
-        # decomp_time
-        results[r][1] = np.mean(results[r][1])
+    for temp in temps:
+        for r in rs:
+            for k in ks:
+                # err
+                all_results[temp][r][0][k][0] = np.mean(all_results[temp][r][0][k][0])
+                # infer_time
+                all_results[temp][r][0][k][1] = np.mean(all_results[temp][r][0][k][1])
+            # decomp_time
+            all_results[temp][r][1] = np.mean(all_results[temp][r][1])
 
-    return results
+    return all_results
 
 
 if __name__ == '__main__':
     test_group = sys.argv[1]
     limit = 20
+    temps = [5, 1, 0.5, 0.1]
     res = run_tests(
         test_group,
         rs=[2, 5, 10, 100, 1000],
-        ks=[10, 100, 1000, 10000, 100000, 1000000],
+        ks=[10, 100, 1000, 10000, 100000], #, 1000000],
+        temps=temps,
         limit=limit,
     )
-    save_plot(res, 'fold0-{}-first{}'.format(test_group, limit))
+    for temp in temps:
+        save_plot(res[temp], 'fold0-{}-first{}-t={}'.format(test_group, limit, temp))
 
