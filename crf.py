@@ -1,7 +1,7 @@
 import json
+import random
 from typing import List
 import time
-
 import numpy as np
 import sys
 import tbp
@@ -12,14 +12,14 @@ from matplotlib import pyplot as plt
 
 LETTERS = 'abcdefghijklmnopqrstuvwxyz'
 
-def read_pot(filename, limit=None) -> List[Graph]:
+def read_pot(filename, subset=None) -> List[Graph]:
     """
     Read Ye Nan's .pot format and return the CRFs as a list of Graph instances (each .pot file contains several CRFs
     separated by a blank line). The original files contain ^T characters, these should be replaced with spaces first
     e.g. (on OSX) by:
         $ for i in 1 2 3 4 5; do echo $i; sed -i '' -e 's/^T/ /g' hocrf/fold0-$i/fold0-$i.pot; done
     (for linux, in-place sed syntax is slightly different).
-    :param limit: Stop after reading this many graphs.
+    :param subset: List of indices of graphs to choose, default (None) returns all graphs.
     """
     with open(filename, 'r') as f:
         # Maps <tuple of variable indices> -> Factor, so we can quickly determine whether to add the line to an existing
@@ -32,13 +32,14 @@ def read_pot(filename, limit=None) -> List[Graph]:
         n = 0
         for i, line in enumerate(f):
             if not line.strip():
-                # If we see a blank line, this indicates the end of this graph, so add it to the list and start building
+                # If we see a blank line, this indicates the end of this graph, so yield it and then start building
                 # the next graph.
                 if factors.values():
-                    yield Graph(factors.values())
+                    if not subset or n in subset:
+                        yield Graph(factors.values())
+                        if n == sorted(subset)[-1]:
+                            return
                     n += 1
-                    if limit and n == limit:
-                        return
                     factors = {}
                     largest_var = None
                 continue
@@ -69,11 +70,11 @@ def read_pot(filename, limit=None) -> List[Graph]:
     # print("Read {} CRFs".format(len(gs)))
     # return gs
 
-def read_marg(filename, limit=None):
+def read_marg(filename, subset=None):
     """
     Read Ye Nan's .marg format and return a list of graph marginals, each of which is a list of lists (each .mar file
     contains marginals for multiple graphs, separated by a blank line).
-    :param limit: Stop after reading this many graphs.
+    :param subset: List of indices of graphs to choose, default (None) returns all graphs.
     """
     with open(filename, 'r') as f:
 
@@ -88,10 +89,11 @@ def read_marg(filename, limit=None):
         for line in f:
             if not line.strip():
                 if marginals:
-                    yield marginals
+                    if not subset or n in subset:
+                        yield marginals
+                        if n == sorted(subset)[-1]:
+                            return
                     n += 1
-                    if limit and n == limit:
-                        return
                     marginals = []
                 continue
 
@@ -163,13 +165,14 @@ def save_plot(results, name):
         print(json.dumps(results), file=f)
 
 
-def run_tests(test_group, rs, ks, temps=None, limit=None):
+def run_tests(test_group, rs, ks, temps=None, subset=None):
     """
     :param test_group: Number 1-5 indicating which of Ye Nan's tests to run
     :param rs: List of r values (number of components)
     :param ks: List of k values (TBP sample size)
     :param temps: List of temperature adjustment factors (default is [1], i.e. just use the original graph potentials)
-    :param limit: Set this to limit the number of graphs used for tests
+    :param subset: List of indices of graphs to choose, since testing all graphs takes a long time. Default (None)
+    tests all graphs.
     :return: Dict of results {temp -> {r -> [{k -> [err, infer_time]}, decomp_time]}}
     """
 
@@ -178,13 +181,6 @@ def run_tests(test_group, rs, ks, temps=None, limit=None):
 
     graph_filename = 'hocrf/fold0-{0}/fold0-{0}.pot'.format(test_group)
     marg_filename = 'hocrf/fold0-{0}/fold0-{0}.marg'.format(test_group)
-    print("Reading graphs from file {}".format(graph_filename))
-    gs = read_pot(graph_filename, limit=limit)
-    print("Reading marginals from file {}".format(marg_filename))
-    marg = read_marg(marg_filename, limit=limit)
-
-    # if len(marg) != len(gs):
-    #     print("Warning: Number of marginals read ({}) not equal to number of graphs read ({})".format(len(marg), len(gs)))
 
     # Results format will be {temp -> {r -> [{k -> [err, infer_time]}, decomp_time]}}
     # Initially, err, infer_time and decomp_time will be lists - later we take the average
@@ -194,8 +190,8 @@ def run_tests(test_group, rs, ks, temps=None, limit=None):
         for r in rs:
             results[r] = [{}, []]
             for i, (g, true_marg) in enumerate(zip(
-                    read_pot(graph_filename, limit=limit), read_marg(marg_filename, limit=limit))):
-                print("Graph {}".format(i+1))
+                    read_pot(graph_filename, subset=subset), read_marg(marg_filename, subset=subset))):
+                print("Graph {} (#{})".format(i+1, subset[i]))
 
                 # Check number of variables and variable cardinalities match between .pot and .marg
                 cardinalities = g.get_cardinality_list()
@@ -240,14 +236,21 @@ def run_tests(test_group, rs, ks, temps=None, limit=None):
 if __name__ == '__main__':
     test_group = sys.argv[1]
     limit = 20
-    temps = [5, 1, 0.5, 0.1]
+    temps = [1, 0.5, 0.1]
+
+    # Choose which graphs to test at random (just taking the first `limit` graphs from the start of the files is
+    # not fair, because they are different handwriting examples of the same word). Rather than load all graphs
+    # into memory and take a subset, we choose which graphs to load in advance to save memory.
+    n_graphs = 6250  # Number of graphs in the file
+    indices = sorted(random.sample(range(n_graphs), limit))
+
     res = run_tests(
         test_group,
         rs=[2, 5, 10, 100, 1000],
         ks=[10, 100, 1000, 10000, 100000], #, 1000000],
         temps=temps,
-        limit=limit,
+        subset=indices,
     )
     for temp in temps:
-        save_plot(res[temp], 'fold0-{}-first{}-t={}'.format(test_group, limit, temp))
+        save_plot(res[temp], 'fold0-{}-random{}-t={}'.format(test_group, limit, temp))
 
