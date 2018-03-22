@@ -12,8 +12,93 @@ from matplotlib import pyplot as plt
 
 LETTERS = 'abcdefghijklmnopqrstuvwxyz'
 
+def add_decomposed_factors(*args):
+    # TODO when this works, implement as + operator for DecomposedFactor instead
 
-def decompose_sparse_factor(factor: Factor) -> DecomposedFactor:
+    vars = args[0].vars
+    for df in args[1:]:
+        assert sorted(df.vars) == sorted(vars), "Cannot add DecomposedFactors with different variable sets"
+
+    weights = np.hstack([df.weights for df in args])
+    matrices = [np.hstack([df.matrices[df.vars.index(var)] for df in args]) for var in vars]
+
+    return DecomposedFactor(vars, weights, matrices)
+
+
+def decompose_sparse_factor(factor: Factor, var_order) -> DecomposedFactor:
+    # Return a DecomposedFactor equal to Factor.
+
+    # TODO what variable order should we use to build the tree?
+
+    assert sorted(var_order) == sorted(factor.vars)
+
+    # Base case: 1d vector
+    if factor.n_vars == 1:
+        return DecomposedFactor(
+            vars=factor.vars,
+            weights=np.array([1]),
+            matrices=[factor.table.reshape((len(factor.table), 1))],
+        )
+
+
+    var = var_order[0]
+    var_index = factor.vars.index(var)
+    var_cardinality = factor.table.shape[var_index]
+
+    res = None
+
+    for i in range(var_cardinality):
+        # Get the ith slice (hyperrectangle) of factor.table along the var axis
+        # idx is equivalent to something like [:, :, :, i, :, :, :]
+        idx = [slice(None)] * factor.n_vars
+        idx[var_index] = i
+        cur_slice = factor.table[idx]
+        assert cur_slice.ndim == factor.n_vars - 1
+
+        if np.any(cur_slice):
+            # This slice contains at least one nonzero entry
+
+            min_value = np.min(cur_slice)
+            cur_slice -= min_value
+
+            # Recurse to obtain a decomposition for the slice
+            child_vars = [x for x in factor.vars if x != var]
+            slice_decomposition = decompose_sparse_factor(Factor(child_vars, cur_slice), var_order[1:])
+
+            # slice_decomposition is for the slice only; we need to add a dimension so the shape matches factor
+            var_matrix = np.zeros((var_cardinality, len(slice_decomposition.weights)))
+            var_matrix[i, :] = 1
+            child_decomposition = DecomposedFactor(
+                vars=[var] + slice_decomposition.vars,
+                weights=slice_decomposition.weights,
+                matrices=[var_matrix] + slice_decomposition.matrices,
+            )
+
+            # Add the constant term for this slice - this is a single rank-1 tensor covering the entire slice,
+            # with values set to 1 and weight set to min_value.
+            const_matrices = [np.ones((x, 1)) for x in factor.table.shape]
+            const_matrices[var_index] = np.zeros((var_cardinality, 1))
+            const_matrices[var_index][i, 0] = 1
+            const_term = DecomposedFactor(
+                vars=factor.vars,
+                weights=np.array([min_value]),
+                matrices=const_matrices,
+            )
+
+            # Add these rank-1 tensors to the final result
+            if res is None:
+                res = add_decomposed_factors(child_decomposition, const_term)
+            else:
+                res = add_decomposed_factors(res, child_decomposition, const_term)
+
+    return res
+
+
+
+
+
+
+def decompose_sparse_factor_ye(factor: Factor) -> DecomposedFactor:
     """
     Recursively construct a tensor decomposition for a sparse factor. Views the factor as a tree of height n_vars.
     Leaf nodes represent single non-default values in the original factor. Each leaf node contributes a single rank-1
@@ -85,7 +170,8 @@ def construct_rank1_tensors(tensors, weights, factor, indices, depth):
 
 # TODO if this works, move it to tbp.py as g.decompose_as_tree()
 def decompose_as_tree(g):
-    return DecomposedGraph([decompose_sparse_factor(f) for f in g.factors])
+    # TODO f.vars here may not be the optimal ordering for the tree decomposition
+    return DecomposedGraph([decompose_sparse_factor(f, f.vars) for f in g.factors])
 
 def read_pot(filename, subset=None) -> List[Graph]:
     """
@@ -408,7 +494,22 @@ def run_tests(test_group, decompose_fn, ks, temps, subset=None):
 #     return all_results
 #
 
-if __name__ == '__main__':
+def test():
+    x = Factor([0,1,2], np.array([
+        [
+            [1,2,3],
+            [4,5,6]
+        ],
+        [
+            [-1,0,3],
+            [4,44,6]
+        ],
+    ]))
+    res = decompose_sparse_factor(x, [2,0,1])
+    return res
+
+
+def main():
     test_group = sys.argv[1]
     limit = 20
     ks = [100, 1000, 10000, 100000]
@@ -436,4 +537,7 @@ if __name__ == '__main__':
     save_plot({'ILS (r=100)': res_ils, 'TREE': res_tree}, ks, 1., 'fold0-{}-random{}-tree'.format(test_group, limit))
 
 
-# vim: softtabstop=4 shiftwidth=4 tabstop=4 expandtab
+if __name__ == '__main__':
+    main()
+
+
